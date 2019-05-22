@@ -1,0 +1,332 @@
+---
+title: "Anaylzing Gun Violence in the United States"
+author: 'Michael Molinari, Simrat Bhandari, Marziyeh Khodadadzadeh'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+#Introduction
+Gun violence is one of the most prominent contemporary issues plaguing the United States.  It has become one of the most politicized topics in the country as incidents of gun violence, especially ones occurring at schools and places of worship, are featured more frequently in media outlets.  This tutorial’s purpose is to examine the issue of gun violence in the United States and gain insights that could help make informed policy decisions.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rvest)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(jsonlite)
+library(magrittr)
+library(httr)
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+library(stringi)
+library(leaflet)
+
+```
+
+#Data Collection and Tidying
+The first steps taken are collecting and tidying the data.  The dataset (https://www.kaggle.com/jameslko/gun-violence-data) was obtained from Kaggle.  Kaggle is a collaborative community of people interested in data science and machine learning where they share datasets and models.  After downloading, we read the csv file using R, turning it into a dataframe, which is a data structure, similar to a table, consisting of rows and columns.  The rows and columns of a dataframe are the entities and attributes respectively.
+
+Once putting the data into a dataframe, we removed columns unnecessary to our analysis.  We then processed some of the remaining columns to make them easier to read.  Information in each column is represented as (index)::detail, and they are separated by “||” if there are multiple entries.  We transform The columns participant_age_group, participant_age, participant_gender, participant_status, and participant_type by turning the details into a list or NA where data isn't present.  We also transformed the representation of firearms in the gun_type column.  The representation of data in the gun_type column is overly detailed, naming the weapon used in the incident.  To make it more general, we transformed it to denote whether it was an automatic firearm used or a pistol/shotgun.  Some of the entries are also called “unknown” or “other”.  We do not know what this are so we just left these.  Lastly, we changed the incident_characteristics column.  This column provided a very detailed summary of what happened at the incident, so we just used regular expressions to see if they contain the substring “Mass Shooting” or “Isolated Shooting”.  We then change the representation so whichever substring it contains and throw out the other details.
+```{r}
+# getting dataframe from a csv file
+gun_df <- read.csv(file="gun-violence-data_01-2013_03-2018.csv")
+
+# we can display the attributes of our dataframe using names(df)
+names(gun_df)
+```
+
+```{r}
+#dropping the unnecessary columns using the select operation from dplyr
+gun_df1 <- select(gun_df, -gun_stolen , -participant_name, -incident_url, -source_url, -incident_url_fields_missing, -location_description, -state_house_district, -state_senate_district, -sources, -participant_relationship)
+
+# let's view the resulting dataframe
+gun_df1
+
+# we see that some columns are treated as factors which means different values are treated as levels (categorical variables). But this is not the case for most of our column values. Therefore, before we proceed to performing more data cleaning, we can use the sapply function to gather all the columns that are of type factor and then use the same function again to convert those columns to characters. 
+fctr.cols <- sapply(gun_df1, is.factor)
+gun_df1[, fctr.cols] <- sapply(gun_df1[, fctr.cols], as.character)
+
+```
+
+```{r}
+#this function takes a string an splits it by "||". We define a list, lst, and populate the list by looping over the splitted list and using regular expression to extract the element that comes after "::"
+splitter <- function(input){
+  splitted_list <- strsplit(input, "\\|\\|")
+  size <- lengths(splitted_list, use.names = TRUE)
+  lst = vector("list", size)
+  if(size == 0){
+    return(NA_character_) # returing NA if entry was empty
+  }else{
+    for(i in 1:(size)){
+      element <- splitted_list[[1]][i] 
+      clean_age <- str_extract(as.character(element), "(?<=\\d{1,2}::).+")
+      lst[[i]] <- clean_age
+    }
+  lst
+  }
+}
+df_size = nrow(gun_df1) #getting the number of entries in dataframe
+# we define lists to store the cleaned data we get from calling the splitter function 
+clean_age_vec <- vector("list", df_size)
+clean_age_group_vec <- vector("list", df_size)
+clean_status_vec <- vector("list", df_size)
+clean_type_vec <- vector("list", df_size)
+clean_gender_vec <- vector("list", df_size)
+
+# we loop through the dataframe and we pass the contents of the columns we want to tidy up to our splitter function. We store the results in our defined lists so we can set those to the original columns after we traverse the whole dataframe
+for (row in 1:df_size) {
+    original_age  <- gun_df1[row, "participant_age"]
+    original_age_group <- gun_df1[row, "participant_age_group"]
+    original_status <- gun_df1[row, "participant_status"]
+    original_participant_type <- gun_df1[row, "participant_type"]
+    original_gender <- gun_df1[row, "participant_gender"]
+  
+    clean_age_vec[[row]] <- splitter(original_age)
+    clean_age_group_vec[[row]] <- splitter(original_age_group)
+    clean_status_vec[[row]] <- splitter(original_status)
+    clean_type_vec[[row]] <- splitter(original_participant_type)
+    clean_gender_vec[[row]] <- splitter(original_gender)
+}
+gun_df1$participant_age = clean_age_vec
+gun_df1$participant_age_group = clean_age_group_vec
+gun_df1$participant_status = clean_status_vec
+gun_df1$participant_type = clean_type_vec
+gun_df1$participant_gender = clean_gender_vec
+```
+
+```{r}
+# we define to functions to check if the passed inputs contain a specific substring. We can do this by using the grepl function. This function takes a pattern that we're looking for and a text/character vector to search. It returns a boolean depending on the result of the search.  
+
+finder1 <- function(input){
+  if(identical(input,"")){
+    return(NA_character_)
+  }else if(grepl("Mass Shooting", input)){
+    return("Mass Shooting(4+ Deaths/Injuries)")
+  }else{
+    return("Isolated Shooting(0-3 Deaths/Injuries")
+  }
+}
+
+finder2 <- function(input){
+  if(identical(input, "")){
+     return(NA_character_)
+  }else if(grepl("Unkown", input)){
+    return("Unkown")
+  }else if(grepl("Other", input)){
+    return("Other")
+  }else if(grepl("AK-47", input) ||grepl("AR-15", input) || grepl("Auto", input)){
+    return("Automatic Gun Used")
+  }else{
+    return("Pistol/Shotgun")
+  }
+}
+```
+
+```{r}
+# we loop through the dataframe and pass each entry of the columns we want to tidy up to our previously defined finder functions and set the original contents of the columns to the result of the function calls.
+for(row in 1:df_size){
+  gun_df1[row, "incident_characteristics"] = finder1(gun_df1[row, "incident_characteristics"])
+  gun_df1[row,"gun_type"] = finder2(gun_df1[row, "gun_type"])
+}
+```
+
+```{r}
+# we take care of the rest of the missing values using the following code. We assing NA to any entry that is empty in the dataframe
+gun_df1[ gun_df1 == "" ] <- NA
+```
+
+```{r}
+# for further analysis, we're interested in the just the year and total number of harm (number of injured and killed individuals) that gun use have caused. So we create new columns as follows
+
+
+# Extracting the year from the dates column using regex
+gun_df1$year <- as.integer(str_extract(gun_df1$date, "\\d{4}"))
+
+# taking the sum of n_injured and n_killed vectors and setting it to the new "harmed" column
+gun_df1$harmed <- as.integer(gun_df1$n_injured + gun_df1$n_killed)
+```
+
+```{r}
+gun_df2 = gun_df1
+gun_df3 = gun_df1
+```
+
+Our Data is all tidied up now
+```{r}
+head(gun_df1)
+```
+
+#Data Visualization
+This is where we visualize the data by placing it over a map.  For our tutorial, we created a heatmap, which colors states based on how many incidents occurred.
+
+Here we load the map data
+```{r}
+states <- geojsonio::geojson_read("https://raw.githubusercontent.com/python-visualization/folium/master/examples/data/us-states.json", method = 'web', what = 'sp')
+
+```
+
+
+##Heatmap of Incidents
+The map below colors the states based on the number of incidents that occurred in the span of 2013 to 2018.
+```{r}
+dat <- gun_df2 %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+pal <- colorNumeric('viridis', NULL)
+
+group_dat <- dat %>%
+  group_by(state) %>%
+  summarise(incidents = n())
+
+heat_map <- leaflet(states) %>%
+  addTiles() %>%
+  addPolygons(stroke = FALSE, smoothFactor = 0.3, fillOpacity = 0.7, fillColor = ~pal(group_dat$incidents)) %>%
+  addLegend(pal = pal, values = ~group_dat$incidents, opacity = 1.0)
+heat_map
+
+```
+The above map shows high amounts of incidents in California and Illinois  There is also a notably high amount of incidents in Georgia and Utah.  Alabama has the lowest number of incidents according to the map.
+
+
+#Hypothesis Testing and Linear Regression
+Now we discuss the next step in the data science pipeline: Hypothesis Testing and Linear Regression. Statistics in general provide us with numerous tools to take large sets of data and make empirically evident statements based on the dataset. One of the tools is Hypothesis Testing.
+
+##Hypothesis Testing
+Hypothesis Testing is used to prove a statistical claim. Hypothesis testing involves starting with a hypothesis, making an alternative, and then performing a test to see whether your initial hypothesis is invalid.  We next describe the steps in hypothesis testing in greater detail.
+
+##Steps of Hypothesis Testing
+1. State the NULL Hypothesis
+2. State the Alternative Hypothesis
+3. Calculate a test statistic
+4. Choose the acceptance region and rejection regions
+5. Based on steps 3 and 4, draw a conclusion about the null hypothesis.
+
+###Step 1: Stating the Null Hypothesis $H_{o}$
+This is the step where we choose a claim that is opposite to the claim that we are trying to make. This is because the basis of any research study is to disrupt the current status quo, and with a null hypothesis that we can reject we can disrupt the current state. In today's day gun violence has increased by very much. This increase comes with many harmful side-effects.
+
+$H_{o}$: Over time, the mean number of people that have died from isolated shootings is the same as mass shootings. 
+$H_{o}:\mu_{deaths, isolated shooting} = \mu_{deaths, mass shooting}$
+
+###Step 2: Stating the Alternative Hypothesis $H_{a}$
+Step where we choose the hypothesis we want to accept because it goes against what is already believed brings new information forward.
+
+$H_{a}$: Over time, the mean number of people that have died from isolated shootings is less than mass shootings. 
+$H_{a}:\mu_{deaths, isolated shooting} < \mu_{deaths, mass shooting}$
+
+###Step 3: Calculating a Test Statistic
+This is to calculate a p-value, which is the statistical significance of a statistic while the null hypothesis is assumed to be true. The p-value is essentially the probability of getting a given sample if the null hypothesis is assumed to be true. For a large value of this value, we can assume that the probability is really high and that we do not need to reject the NULL Hypothesis. In the next step we will set the limits for when we should reject the NULL hypothesis. To calculate the P-Value, we we will use the T-Test. The T-Test is one of the ways to calculate the P-Value.
+
+
+###Step 4: Choosing the Acceptance Region and the Rejection Region
+In this step, we choose a threshold for our P-Values. P-Values have a vast range, and it is imperative to list for which values should we accept or reject the null hypothesis. The higher the limit is, the harder it is for the NULL Hypothesis to pass. In our case, we would reject the null hypothesis if the p-value is less than or equal to 0.005. This value is a very standard value in statistics for rejection regions of p-values.
+
+
+###Step 5: Drawing a Conclusion about the Null Hypothesis
+In this first part of our analysis for the conclusion, we have used Linear Regression. In statistics, we use curve-fitting and linear regression as modes of explaining (fitting) the data. Both methods have their own strengths and weaknesses, but most importantly, these methods are both suitable for their different conditions.
+
+Linear Regression is more suitable for the case where we do not have much data to work with, and we have to extrapolate or explain a trend in a data, then we would choose Linear Regression. However, we will later see that our data is not very suitable for predicting future points.
+
+##Exploratory Analysis
+###Analysis of Annual Isolated Shootings
+```{r}
+gun_df3$year <- str_extract(gun_df3$date, '\\d{4}')
+
+gun_df4 <- gun_df3 %>%
+  filter(year != '2018', incident_characteristics == 'Isolated Shooting(0-3 Deaths/Injuries') %>%
+  group_by(year) %>%
+  summarize(killed_isolated = n())
+view(gun_df4)
+
+injured_lm <- lm(gun_df4$year~killed_isolated, data = gun_df4)
+tidied_injured_lm <- broom::tidy(injured_lm)
+tidied_injured_lm
+
+gun_df4$year <- as.Date(gun_df4$year, format='%Y')
+gun_df4 %>%
+  ggplot(aes(x = year, y = killed_isolated)) +
+  geom_line()
+
+x1 = gun_df4$year
+y1 = gun_df4$killed_isolated
+plot(x1, y1, ,xlab='year',ylab='people killed',main = 'year vs people killed in isolated shootings')
+dev.off()
+result1.lm = lm(y1~x1)
+result1.sum = summary(result1.lm)
+result1.sum
+# plot regression line
+plot(x1,y1,main="regression line")
+abline(result1.lm)
+dev.off()
+# confidence interval
+confint(result1.lm,level=.95)
+# residual plot
+cbind(y1-result1.lm$fitted.values,result1.lm$residuals)
+plot(result1.lm)
+# estimate of sigma 
+sqrt(sum(result1.lm$residuals^2)/(length(y1)-2))
+result1.sum$sigma
+
+```
+
+###Analysis of Annual Mass Shootings
+```{r}
+gun_df5 <- gun_df3 %>%
+  filter(year != 2018, incident_characteristics == 'Mass Shooting(4+ Deaths/Injuries)') %>%
+  group_by(year) %>%
+  summarize(killed_mass = n())
+gun_df5
+
+mass_shootings <- lm(year~killed_mass, data = gun_df5)
+tidied_mass_shootings <- broom::tidy(mass_shootings)
+tidied_mass_shootings
+
+gun_df5$year <- gun_df4$year
+gun_df5 %>%
+  ggplot(aes(x = year, y = killed_mass)) +
+  geom_line()
+view(gun_df5)
+
+x2 = gun_df5$year
+y2 = gun_df5$killed_mass
+plot(x2, y2, ,xlab='year',ylab='people killed',main = 'year vs people killed in mass shootings')
+dev.off()
+result2.lm = lm(y2~x2)
+result2.sum = summary(result2.lm)
+result2.sum
+# plot regression line
+plot(x2,y2,main="regression line")
+abline(result2.lm)
+dev.off()
+# confidence interval
+confint(result2.lm,level=.95)
+# residual plot
+cbind(y2-result2.lm$fitted.values,result2.lm$residuals)
+plot(result2.lm)
+# estimate of sigma 
+sqrt(sum(result2.lm$residuals^2)/(length(y2)-2))
+result2.sum$sigma
+
+```
+
+##T-Tests
+Here we perform a lower tailed t-test and a two-tailed t-test
+```{r}
+#lower tailed t-test
+t.test(n_killed~incident_characteristics,data=gun_df1,alternative="less")
+#two-tailed t-test
+t.test(n_killed~incident_characteristics,data=gun_df1)
+
+```
+
+#T-Test Results and Conculsions
+When making the linear model, the p-values for the isolated shootings and the mass shootings are both greater than 0.05, thus we can conclude that there is no statistical significance between year and isolated and mass shootings.  Therefore, plotting a regression line with the data would serve no purpose as there is not a linear relationship between year and deaths in either situation.  Both the lower-tailed t-test and the two-tailed t-tests have p-values of less than 0.05.  Therefore, we can reject $H_o$, the means in number of deaths caused by isolated shootings and mass shootings are equal.  There is statistically significant evidence that more deaths are caused by mass shootings.
+
+#Insights
+We can gain many insights can be gained from the results of the analyses done.  According to the data visualization via the heatmap, it is apparent how incidents of gun violence are spread throughout the country.  It shows exactly how prevalent incidents are and where they happen.  This shows that cases vary by state.  Policy makers can use this to specialize their solutions for certain regions, as not every solution may work everywhere.
+We learned through the linear regression model that you cannot predict the number of incidents based year.  It is not necessarily given that as time goes on, the number of incidents will decrease.  It can also be seen that the increase over the years is not linear.  
+The hypothesis testing that we performed led us to reject the null hypothesis and accept our alternative hypothesis.  The T-test proved that the mean number number of deaths in isolated shootings is in fact less than mass shootings.  As a result, policy makers can use this information to do something to reduce the amount of incidents in general, not just mass shootings.
